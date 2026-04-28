@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  mock-anis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mock-anis
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - "4500:4500"
