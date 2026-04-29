@@ -525,22 +525,7 @@
 
     <script>
       let selectedFile = null;
-      const sektorCounters = {};
-
-      const sektorPrefix = {
-        Kuliner: "mkl",
-        Perdagangan: "mpd",
-        "Kesehatan Kecantikan": "mks",
-        Pendidikan: "mpn",
-        "Jasa Profesional": "mjs",
-        "Pemerintah dan Sosial": "mpmt",
-        Keuangan: "mkeu",
-        Logistik: "mlg",
-        "Kreatif dan Digital": "mkr",
-        "Gaya Hidup": "mgl",
-        Agrikultur: "mag",
-        Otomotif: "mot",
-      };
+      let isGeneratingId = false;
 
       // Drag & drop
       const zone = document.getElementById("upload-zone");
@@ -582,13 +567,29 @@
         document.getElementById("file-input").value = "";
       }
 
-      function generateId() {
+      async function generateId() {
         const sektor = document.getElementById("sektor").value;
-        if (!sektor) return;
-        const prefix = sektorPrefix[sektor] || "mxx";
-        if (!sektorCounters[sektor]) sektorCounters[sektor] = 1;
-        document.getElementById("mock-id").value =
-          `${prefix}${String(sektorCounters[sektor]).padStart(3, "0")}`;
+        const mockIdInput = document.getElementById("mock-id");
+        if (!sektor) {
+          mockIdInput.value = "";
+          return;
+        }
+
+        try {
+          isGeneratingId = true;
+          mockIdInput.value = "Generating...";
+          const res = await fetch(
+            `/api/mock-id/next?sektor=${encodeURIComponent(sektor)}`,
+          );
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "Gagal generate ID");
+          mockIdInput.value = data.mock_id || "";
+        } catch (err) {
+          mockIdInput.value = "";
+          showToast("Gagal generate Mock ID: " + err.message, "error");
+        } finally {
+          isGeneratingId = false;
+        }
       }
 
       function setLoading(loading) {
@@ -613,36 +614,44 @@
           showToast("Lengkapi semua field!", "error");
           return;
         }
+        if (isGeneratingId) {
+          showToast("Mock ID masih diproses, coba lagi sesaat.", "error");
+          return;
+        }
 
         setLoading(true);
 
         try {
           const formData = new FormData();
-          formData.append("image", selectedFile);
+          formData.append("sektor", sektor);
           formData.append("mock_id", mockId);
           formData.append("nama_mock", nama);
-          formData.append("sektor", sektor);
           formData.append("keywords", keywords);
+          formData.append("image", selectedFile);
 
           const res = await fetch("/api/upload", {
             method: "POST",
             body: formData,
+            headers: {
+              "x-sektor": sektor,
+            },
           });
 
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || "Upload gagal");
 
+          const savedMockId = data.mock_id || mockId;
+
           addLog({
-            mockId,
+            mockId: savedMockId,
             nama,
             sektor,
             imageURL: data.path_image,
             thumb: URL.createObjectURL(selectedFile),
           });
 
-          sektorCounters[sektor] = (sektorCounters[sektor] || 1) + 1;
           resetForm();
-          showToast(`✓ ${mockId} berhasil disimpan!`, "success");
+          showToast(`✓ ${savedMockId} berhasil disimpan!`, "success");
         } catch (err) {
           showToast("Gagal: " + err.message, "error");
         }
@@ -653,6 +662,7 @@
       function resetForm() {
         document.getElementById("nama-mock").value = "";
         document.getElementById("keywords").value = "";
+        document.getElementById("mock-id").value = "";
         removeFile();
         generateId();
       }

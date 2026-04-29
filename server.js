@@ -4,11 +4,30 @@ const express = require("express");
 const multer = require("multer");
 const cors = require("cors");
 const path = require("path");
+const http = require("http");
 const https = require("https");
+const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 4500;
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
+const BASE_IMAGE_URL =
+  process.env.BASE_IMAGE_URL || "https://anismockup.anitech.id";
+
+const sektorPrefix = {
+  Kuliner: "mkl",
+  Perdagangan: "mpd",
+  "Kesehatan Kecantikan": "mks",
+  Pendidikan: "mpn",
+  "Jasa Profesional": "mjs",
+  "Pemerintah dan Sosial": "mpmt",
+  Keuangan: "mkeu",
+  Logistik: "mlg",
+  "Kreatif dan Digital": "mkr",
+  "Gaya Hidup": "mgl",
+  Agrikultur: "mag",
+  Otomotif: "mot",
+};
 
 app.use(cors());
 app.use(express.json());
@@ -20,16 +39,22 @@ app.use("/img", express.static(path.join(__dirname, "public/img")));
 // Storage config — simpan di public/img/<sektor>/
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const sektor = req.body.sektor || "general";
-    const fs = require("fs");
+    const sektor = getSektorForStorage(req);
+    if (!sektor) {
+      cb(
+        new Error(
+          "Sektor upload tidak ditemukan. Pastikan header x-sektor atau field sektor terkirim.",
+        ),
+      );
+      return;
+    }
+
     const dir = path.join(__dirname, "public/img", sektor);
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
   filename: (req, file, cb) => {
-    const mockId = req.body.mock_id || Date.now().toString();
-    const ext = path.extname(file.originalname);
-    cb(null, `${mockId}${ext}`);
+    cb(null, `${Date.now()}${path.extname(file.originalname)}`);
   },
 });
 
@@ -43,44 +68,130 @@ const upload = multer({
   },
 });
 
+app.get("/api/mock-id/next", async (req, res) => {
+  try {
+    const sektor = normalizeString(req.query.sektor);
+    if (!sektor) {
+      return res.status(400).json({ error: "Parameter sektor wajib diisi" });
+    }
+
+    const prefix = getSektorPrefix(sektor);
+    const result = await requestAppsScript({
+      action: "next_mock_id",
+      sektor,
+      prefix,
+    });
+
+    const mockId = normalizeString(result.mock_id);
+    if (!mockId) {
+      throw new Error(
+        "Apps Script belum mengembalikan mock_id. Pastikan action next_mock_id tersedia.",
+      );
+    }
+
+    res.json({ success: true, mock_id: mockId, sektor });
+  } catch (err) {
+    console.error("Next ID error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Upload endpoint
 app.post("/api/upload", upload.single("image"), async (req, res) => {
   try {
     if (!req.file)
       return res.status(400).json({ error: "File tidak ditemukan" });
 
-    const { mock_id, nama_mock, sektor, keywords } = req.body;
-    const imageURL = `https://anismockup.anitech.id/img/${sektor}/${req.file.filename}`;
+    const mockId = normalizeString(req.body.mock_id);
+    const namaMock = normalizeString(req.body.nama_mock);
+    const sektor = normalizeString(req.body.sektor);
+    const keywords = normalizeString(req.body.keywords);
+    const sektorHeader = normalizeString(req.headers["x-sektor"]);
 
-    // Kirim ke Google Apps Script → Sheets
-    await sendToSheets({
-      mock_id,
-      nama_mock,
+    if (!mockId || !namaMock || !sektor || !keywords) {
+      return res.status(400).json({ error: "Semua field wajib diisi" });
+    }
+
+    if (sektorHeader && sektorHeader !== sektor) {
+      return res.status(400).json({
+        error: "Header x-sektor harus sama dengan field sektor",
+      });
+    }
+
+    const sektorFolder = sanitizeSektorForPath(sektor);
+    const imageURL = buildImageURL(sektorFolder, req.file.filename);
+
+    // Kirim ke Google Apps Script → Sheets (dengan validasi unik di sana)
+    const result = await requestAppsScript({
+      action: "create_mock",
+      mock_id: mockId,
+      nama_mock: namaMock,
       sektor,
       keywords,
       path_image: imageURL,
     });
 
+    const finalMockId = normalizeString(result.mock_id) || mockId;
+
     res.json({
       success: true,
-      mock_id,
-      nama_mock,
+      mock_id: finalMockId,
+      nama_mock: namaMock,
       sektor,
       keywords,
       path_image: imageURL,
     });
   } catch (err) {
+    if (req.file && req.file.path) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (cleanupErr) {
+        console.error("Gagal hapus file upload saat rollback:", cleanupErr);
+      }
+    }
     console.error("Upload error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Kirim data ke Google Apps Script
-function sendToSheets(data) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify(data);
+function normalizeString(value) {
+  if (Array.isArray(value)) {
+    return String(value[0] || "").trim();
+  }
+  if (value == null) return "";
+  return String(value).trim();
+}
 
-    // Follow redirect dari Apps Script
+function getSektorPrefix(sektor) {
+  return sektorPrefix[sektor] || "mxx";
+}
+
+function sanitizeSektorForPath(sektor) {
+  return sektor.replace(/[\\/]/g, "-").trim();
+}
+
+function getSektorForStorage(req) {
+  const headerSektor = normalizeString(req.headers["x-sektor"]);
+  const bodySektor = normalizeString(req.body?.sektor);
+  const querySektor = normalizeString(req.query?.sektor);
+  const rawSektor = headerSektor || bodySektor || querySektor;
+
+  if (!rawSektor) return "";
+  return sanitizeSektorForPath(rawSektor);
+}
+
+function buildImageURL(sektor, filename) {
+  return `${BASE_IMAGE_URL}/img/${encodeURIComponent(sektor)}/${encodeURIComponent(filename)}`;
+}
+
+function requestAppsScript(payload) {
+  if (!APPS_SCRIPT_URL) {
+    return Promise.reject(new Error("APPS_SCRIPT_URL belum dikonfigurasi"));
+  }
+
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+
     const options = {
       method: "POST",
       headers: {
@@ -89,10 +200,14 @@ function sendToSheets(data) {
       },
     };
 
-    function makeRequest(url) {
+    function makeRequest(url, redirectCount = 0) {
+      if (redirectCount > 5) {
+        reject(new Error("Terlalu banyak redirect dari Apps Script"));
+        return;
+      }
+
       const urlObj = new URL(url);
-      const lib =
-        urlObj.protocol === "https:" ? require("https") : require("http");
+      const lib = urlObj.protocol === "https:" ? https : http;
 
       const req = lib.request(urlObj, options, (res) => {
         if (
@@ -100,13 +215,34 @@ function sendToSheets(data) {
           res.statusCode < 400 &&
           res.headers.location
         ) {
-          // Follow redirect
-          makeRequest(res.headers.location);
+          const nextURL = new URL(res.headers.location, url).toString();
+          makeRequest(nextURL, redirectCount + 1);
           return;
         }
+
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`Apps Script error status ${res.statusCode}`));
+          return;
+        }
+
         let responseData = "";
         res.on("data", (chunk) => (responseData += chunk));
-        res.on("end", () => resolve(responseData));
+        res.on("end", () => {
+          try {
+            const parsed = JSON.parse(responseData);
+            if (parsed && parsed.success === false) {
+              reject(new Error(parsed.error || "Request ke Apps Script gagal"));
+              return;
+            }
+            resolve(parsed || {});
+          } catch (error) {
+            reject(
+              new Error(
+                "Response Apps Script bukan JSON. Pastikan action API sudah di-deploy.",
+              ),
+            );
+          }
+        });
       });
 
       req.on("error", reject);
