@@ -4,8 +4,6 @@ const express = require("express");
 const multer = require("multer");
 const cors = require("cors");
 const path = require("path");
-const http = require("http");
-const https = require("https");
 const fs = require("fs");
 
 const app = express();
@@ -185,85 +183,36 @@ function buildImageURL(sektor, filename) {
   return `${BASE_IMAGE_URL}/img/${encodeURIComponent(sektor)}/${encodeURIComponent(filename)}`;
 }
 
-function requestAppsScript(payload) {
+async function requestAppsScript(payload) {
   if (!APPS_SCRIPT_URL) {
-    return Promise.reject(new Error("APPS_SCRIPT_URL belum dikonfigurasi"));
+    throw new Error("APPS_SCRIPT_URL belum dikonfigurasi");
   }
 
-  return new Promise((resolve, reject) => {
-    const requestBody = JSON.stringify(payload);
-
-    function makeRequest(url, method = "POST", body = "", redirectCount = 0) {
-      if (redirectCount > 5) {
-        reject(new Error("Terlalu banyak redirect dari Apps Script"));
-        return;
-      }
-
-      const urlObj = new URL(url);
-      const lib = urlObj.protocol === "https:" ? https : http;
-      const headers = {};
-
-      if (method === "POST") {
-        headers["Content-Type"] = "application/json";
-        headers["Content-Length"] = Buffer.byteLength(body);
-      }
-
-      const options = {
-        method,
-        headers,
-      };
-
-      const req = lib.request(urlObj, options, (res) => {
-        if (
-          res.statusCode >= 300 &&
-          res.statusCode < 400 &&
-          res.headers.location
-        ) {
-          const nextURL = new URL(res.headers.location, url).toString();
-          // Apps Script biasa redirect POST -> URL konten yang hanya menerima GET.
-          const nextMethod =
-            method === "POST" && [301, 302, 303].includes(res.statusCode)
-              ? "GET"
-              : method;
-          const nextBody = nextMethod === "POST" ? body : "";
-          makeRequest(nextURL, nextMethod, nextBody, redirectCount + 1);
-          return;
-        }
-
-        if (res.statusCode < 200 || res.statusCode >= 300) {
-          reject(new Error(`Apps Script error status ${res.statusCode}`));
-          return;
-        }
-
-        let responseData = "";
-        res.on("data", (chunk) => (responseData += chunk));
-        res.on("end", () => {
-          try {
-            const parsed = JSON.parse(responseData);
-            if (parsed && parsed.success === false) {
-              reject(new Error(parsed.error || "Request ke Apps Script gagal"));
-              return;
-            }
-            resolve(parsed || {});
-          } catch (error) {
-            reject(
-              new Error(
-                "Response Apps Script bukan JSON. Pastikan action API sudah di-deploy.",
-              ),
-            );
-          }
-        });
-      });
-
-      req.on("error", reject);
-      if (method === "POST" && body) {
-        req.write(body);
-      }
-      req.end();
-    }
-
-    makeRequest(APPS_SCRIPT_URL, "POST", requestBody);
+  const res = await fetch(APPS_SCRIPT_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    redirect: "follow",
   });
+
+  if (!res.ok) {
+    throw new Error(`Apps Script error status ${res.status}`);
+  }
+
+  const text = await res.text();
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(
+      "Response Apps Script bukan JSON. Pastikan action API sudah di-deploy.",
+    );
+  }
+
+  if (parsed && parsed.success === false) {
+    throw new Error(parsed.error || "Request ke Apps Script gagal");
+  }
+  return parsed || {};
 }
 
 app.listen(PORT, () => {
