@@ -82,7 +82,7 @@ app.get("/api/mock-id/next", async (req, res) => {
       prefix,
     });
 
-    const mockId = normalizeString(result.mock_id);
+    const mockId = normalizeString(result.mock_id || result.mockId || result.id);
     if (!mockId) {
       throw new Error(
         "Apps Script belum mengembalikan mock_id. Pastikan action next_mock_id tersedia.",
@@ -131,7 +131,8 @@ app.post("/api/upload", upload.single("image"), async (req, res) => {
       path_image: imageURL,
     });
 
-    const finalMockId = normalizeString(result.mock_id) || mockId;
+    const finalMockId =
+      normalizeString(result.mock_id || result.mockId || result.id) || mockId;
 
     res.json({
       success: true,
@@ -190,17 +191,9 @@ function requestAppsScript(payload) {
   }
 
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify(payload);
+    const requestBody = JSON.stringify(payload);
 
-    const options = {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(body),
-      },
-    };
-
-    function makeRequest(url, redirectCount = 0) {
+    function makeRequest(url, method = "POST", body = "", redirectCount = 0) {
       if (redirectCount > 5) {
         reject(new Error("Terlalu banyak redirect dari Apps Script"));
         return;
@@ -208,6 +201,17 @@ function requestAppsScript(payload) {
 
       const urlObj = new URL(url);
       const lib = urlObj.protocol === "https:" ? https : http;
+      const headers = {};
+
+      if (method === "POST") {
+        headers["Content-Type"] = "application/json";
+        headers["Content-Length"] = Buffer.byteLength(body);
+      }
+
+      const options = {
+        method,
+        headers,
+      };
 
       const req = lib.request(urlObj, options, (res) => {
         if (
@@ -216,7 +220,13 @@ function requestAppsScript(payload) {
           res.headers.location
         ) {
           const nextURL = new URL(res.headers.location, url).toString();
-          makeRequest(nextURL, redirectCount + 1);
+          // Apps Script biasa redirect POST -> URL konten yang hanya menerima GET.
+          const nextMethod =
+            method === "POST" && [301, 302, 303].includes(res.statusCode)
+              ? "GET"
+              : method;
+          const nextBody = nextMethod === "POST" ? body : "";
+          makeRequest(nextURL, nextMethod, nextBody, redirectCount + 1);
           return;
         }
 
@@ -246,11 +256,13 @@ function requestAppsScript(payload) {
       });
 
       req.on("error", reject);
-      req.write(body);
+      if (method === "POST" && body) {
+        req.write(body);
+      }
       req.end();
     }
 
-    makeRequest(APPS_SCRIPT_URL);
+    makeRequest(APPS_SCRIPT_URL, "POST", requestBody);
   });
 }
 
